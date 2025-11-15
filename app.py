@@ -96,17 +96,15 @@ def encode_texts(texts):
         max_length=256,
         return_tensors="pt"
     )
-    with torch.no_grad():
-        for k in encoded:
-            encoded[k] = encoded[k].to("cpu")
+    with torch.inference_mode():
         outputs = encoder(**encoded)
-        token_embeddings = outputs.last_hidden_state.cpu()
+        token_embeddings = outputs.last_hidden_state.detach().float()
         attention_mask = encoded["attention_mask"].unsqueeze(-1).float()
         summed = (token_embeddings * attention_mask).sum(dim=1)
         counts = attention_mask.sum(dim=1).clamp(min=1)
         sentence_embs = summed / counts
         sentence_embs = nn.functional.normalize(sentence_embs, p=2, dim=1)
-    return sentence_embs.detach().cpu().numpy()
+    return sentence_embs.numpy()
 
 
 SKILLS = {
