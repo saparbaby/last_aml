@@ -9,22 +9,22 @@ class MLPv2(nn.Module):
     def __init__(self, dim_in):
         super().__init__()
         self.fc1 = nn.Sequential(
-            nn.Linear(dim_in,256),
+            nn.Linear(dim_in, 256),
             nn.ReLU(),
             nn.Dropout(0.25)
         )
         self.fc2 = nn.Sequential(
-            nn.Linear(256,128),
+            nn.Linear(256, 128),
             nn.ReLU(),
             nn.Dropout(0.25)
         )
-        self.res = nn.Linear(dim_in,128)
-        self.out = nn.Linear(128,3)
+        self.res = nn.Linear(dim_in, 128)
+        self.out = nn.Linear(128, 3)
 
-    def forward(self,x):
-        h=self.fc1(x)
-        h=self.fc2(h)
-        h=h+self.res(x)   # residual
+    def forward(self, x):
+        h = self.fc1(x)
+        h = self.fc2(h)
+        h = h + self.res(x)   
         return self.out(h)
 
 
@@ -47,28 +47,28 @@ class CrossAttentionGRU(nn.Module):
             batch_first=True
         )
 
-        # These dimensions MUST MATCH THE TRAINED MODEL
-        fused_dim = hidden * 2 * 4 + 3   # = 1027
+        
+        fused_dim = hidden * 2 * 4 + 3   
         self.mlp = MLPv2(fused_dim)
 
-    def encode(self,x):
-        out,_ = self.gru(x)
+    def encode(self, x):
+        out, _ = self.gru(x)
         return self.norm(out)
 
-    def forward(self,r,j,skillfit,flag):
-        # Force correct shape (1,1,emb_dim)
-        r = r.view(1,1,-1)
-        j = j.view(1,1,-1)
+    def forward(self, r, j, skillfit, flag):
+        
+        r = r.view(1, 1, -1)
+        j = j.view(1, 1, -1)
 
         r_enc = self.encode(r)
         j_enc = self.encode(j)
 
-        attn,_ = self.cross_attn(r_enc,j_enc,j_enc)
+        attn, _ = self.cross_attn(r_enc, j_enc, j_enc)
 
-        r_f = (r_enc + attn).mean(dim=1)
-        j_f = (j_enc + attn).mean(dim=1)
+        r_f = (r_enc + attn).mean(dim=1)   
+        j_f = (j_enc + attn).mean(dim=1)   
 
-        cosine = nn.functional.cosine_similarity(r_f, j_f, dim=1).unsqueeze(1)
+        cosine = nn.functional.cosine_similarity(r_f, j_f, dim=1).unsqueeze(1)  
 
         feats = torch.cat([
             r_f,
@@ -76,24 +76,32 @@ class CrossAttentionGRU(nn.Module):
             torch.abs(r_f - j_f),
             r_f * j_f,
             cosine,
-            skillfit.unsqueeze(1),
-            flag.unsqueeze(1)
+            skillfit.unsqueeze(1),  
+            flag.unsqueeze(1)      
         ], dim=1)
 
         return self.mlp(feats)
 
 
-
 DEVICE = "cpu"
 
-model = CrossAttentionGRU()
-model.load_state_dict(torch.load("model_best.pt", map_location="cpu"))
-model.eval()
+@st.cache_resource
+def load_models():
+    sbert = SentenceTransformer(
+        "sentence-transformers/all-MiniLM-L6-v2",
+        device=DEVICE
+    )
 
-sbert = SentenceTransformer(
-    "sentence-transformers/all-MiniLM-L6-v2",
-    device="cpu"
-)
+    model = CrossAttentionGRU()
+    state = torch.load("model_best.pt", map_location=DEVICE)
+    model.load_state_dict(state)
+    model.to(DEVICE)
+    model.eval()
+
+    return sbert, model
+
+
+sbert, model = load_models()
 
 
 SKILLS = {
@@ -103,41 +111,55 @@ SKILLS = {
     "aws","azure","gcp","data analysis","machine learning","deep learning"
 }
 
-def extract_skills(text):
+def extract_skills(text: str):
     text = text.lower()
     return [s for s in SKILLS if s in text]
 
 
-LABELS = {0:"❌ No Fit", 1:"⚙️ Partial Fit", 2:"✅ Good Fit"}
+LABELS = {0: "❌ No Fit", 1: "⚙️ Partial Fit", 2: "✅ Good Fit"}
 
-def predict(res_text, job_text):
+
+
+def predict(res_text: str, job_text: str):
+ 
     r_emb = sbert.encode([res_text], normalize_embeddings=True)[0]
     j_emb = sbert.encode([job_text], normalize_embeddings=True)[0]
 
-    r_emb_t = torch.tensor(r_emb, dtype=torch.float32).view(1,1,-1)
-    j_emb_t = torch.tensor(j_emb, dtype=torch.float32).view(1,1,-1)
+    r_emb_t = torch.tensor(r_emb, dtype=torch.float32, device=DEVICE)
+    j_emb_t = torch.tensor(j_emb, dtype=torch.float32, device=DEVICE)
 
     skills_r = set(extract_skills(res_text))
     skills_j = set(extract_skills(job_text))
 
-    matched = len(skills_r & skills_j)
-    missing = len(skills_j - skills_r)
+    matched_set = skills_r & skills_j
+    missing_set = skills_j - skills_r
 
-    skillfit = torch.tensor([matched], dtype=torch.float32)
-    flag = torch.tensor([1.0 if matched > 0 else 0.0], dtype=torch.float32)
+    matched = len(matched_set)
+    
+    skillfit = torch.tensor([float(matched)], dtype=torch.float32, device=DEVICE)
+    flag = torch.tensor([1.0 if matched > 0 else 0.0], dtype=torch.float32, device=DEVICE)
 
     with torch.no_grad():
         logits = model(r_emb_t, j_emb_t, skillfit, flag)
-        probs = torch.softmax(logits, dim=1)[0]
-        pred = torch.argmax(probs).item()
+        probs_t = torch.softmax(logits, dim=1)[0].cpu()
+        probs = probs_t.numpy()
 
-    return pred, probs.numpy(), skills_r & skills_j, skills_j - skills_r
+    p_no, p_partial, p_good = probs
+
+
+    if p_good >= 0.65 and p_good - max(p_no, p_partial) >= 0.10:
+        pred = 2  # Good Fit
+    elif p_no >= 0.65 and p_no - max(p_partial, p_good) >= 0.10:
+        pred = 0  # No Fit
+    else:
+        pred = 1  # Partial Fit
+
+    return pred, probs, matched_set, missing_set
 
 
 st.set_page_config(page_title="Resume ↔ Job Match Scorer", layout="wide")
 
 st.title("🔍 Resume ↔ Job Match Scorer (SBERT + CrossAttention GRU)")
-
 st.write("Enter resume and job description below:")
 
 col1, col2 = st.columns(2)
@@ -163,6 +185,5 @@ if st.button("🔎 Evaluate Match"):
         st.write(f"Good Fit: {probs[2]:.3f}")
 
         st.subheader("🧩 Skills Analysis:")
-
-        st.write("**Matched Skills:**", ", ".join(matched) if matched else "—")
-        st.write("**Missing Required Skills:**", ", ".join(missing) if missing else "—")
+        st.write("**Matched Skills:**", ", ".join(sorted(matched)) if matched else "—")
+        st.write("**Missing Required Skills:**", ", ".join(sorted(missing)) if missing else "—")
