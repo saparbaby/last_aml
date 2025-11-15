@@ -1,9 +1,8 @@
 import streamlit as st
 import torch
 import torch.nn as nn
-from sentence_transformers import SentenceTransformer
 import numpy as np
-
+from transformers import AutoTokenizer, AutoModel
 
 class MLPv2(nn.Module):
     def __init__(self, dim_in):
@@ -24,7 +23,7 @@ class MLPv2(nn.Module):
     def forward(self, x):
         h = self.fc1(x)
         h = self.fc2(h)
-        h = h + self.res(x)   
+        h = h + self.res(x)   # residual
         return self.out(h)
 
 
@@ -47,8 +46,8 @@ class CrossAttentionGRU(nn.Module):
             batch_first=True
         )
 
-        
-        fused_dim = hidden * 2 * 4 + 3   
+        # These dimensions MUST MATCH THE TRAINED MODEL
+        fused_dim = hidden * 2 * 4 + 3   # = 1027
         self.mlp = MLPv2(fused_dim)
 
     def encode(self, x):
@@ -56,7 +55,7 @@ class CrossAttentionGRU(nn.Module):
         return self.norm(out)
 
     def forward(self, r, j, skillfit, flag):
-        
+        # Shape: (B=1, T=1, emb_dim)
         r = r.view(1, 1, -1)
         j = j.view(1, 1, -1)
 
@@ -65,10 +64,10 @@ class CrossAttentionGRU(nn.Module):
 
         attn, _ = self.cross_attn(r_enc, j_enc, j_enc)
 
-        r_f = (r_enc + attn).mean(dim=1)   
-        j_f = (j_enc + attn).mean(dim=1)   
+        r_f = (r_enc + attn).mean(dim=1)   # (1, 256)
+        j_f = (j_enc + attn).mean(dim=1)   # (1, 256)
 
-        cosine = nn.functional.cosine_similarity(r_f, j_f, dim=1).unsqueeze(1)  
+        cosine = nn.functional.cosine_similarity(r_f, j_f, dim=1).unsqueeze(1)  # (1,1)
 
         feats = torch.cat([
             r_f,
@@ -76,8 +75,8 @@ class CrossAttentionGRU(nn.Module):
             torch.abs(r_f - j_f),
             r_f * j_f,
             cosine,
-            skillfit.unsqueeze(1),  
-            flag.unsqueeze(1)      
+            skillfit.unsqueeze(1),  # (1,1)
+            flag.unsqueeze(1)       # (1,1)
         ], dim=1)
 
         return self.mlp(feats)
@@ -85,12 +84,21 @@ class CrossAttentionGRU(nn.Module):
 
 DEVICE = "cpu"
 
+
 @st.cache_resource
 def load_models():
-    sbert = SentenceTransformer(
-        "sentence-transformers/all-MiniLM-L6-v2",
-        device=DEVICE
+    
+    model_name = "sentence-transformers/all-MiniLM-L6-v2"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    encoder = AutoModel.from_pretrained(
+        model_name,
+        torch_dtype=torch.float32,
+        low_cpu_mem_usage=False   # важно, чтобы не было meta-тензоров
     )
+    encoder.to(DEVICE)
+    encoder.eval()
 
     model = CrossAttentionGRU()
     state = torch.load("model_best.pt", map_location=DEVICE)
@@ -98,10 +106,45 @@ def load_models():
     model.to(DEVICE)
     model.eval()
 
-    return sbert, model
+    return tokenizer, encoder, model
 
 
-sbert, model = load_models()
+tokenizer, encoder, model = load_models()
+
+
+
+def encode_texts(texts):
+    """
+    Приближенно повторяем логику SentenceTransformer:
+    - токенизация
+    - прогон через MiniLM
+    - mean pooling по токенам с учетом attention_mask
+    - L2-нормализация
+    """
+    encoded = tokenizer(
+        texts,
+        padding=True,
+        truncation=True,
+        max_length=256,
+        return_tensors="pt"
+    )
+
+    with torch.no_grad():
+        encoded = {k: v.to(DEVICE) for k, v in encoded.items()}
+        outputs = encoder(**encoded)
+        token_embeddings = outputs.last_hidden_state  # (B, T, H)
+        attention_mask = encoded["attention_mask"].unsqueeze(-1)  # (B, T, 1)
+
+        
+        summed = (token_embeddings * attention_mask).sum(dim=1)
+        counts = attention_mask.sum(dim=1).clamp(min=1)
+        sentence_embs = summed / counts
+
+
+        sentence_embs = nn.functional.normalize(sentence_embs, p=2, dim=1)
+
+    return sentence_embs.cpu().numpy()
+
 
 
 SKILLS = {
@@ -110,6 +153,7 @@ SKILLS = {
     "pytorch","tensorflow","react","node","flask","django","fastapi",
     "aws","azure","gcp","data analysis","machine learning","deep learning"
 }
+
 
 def extract_skills(text: str):
     text = text.lower()
@@ -121,9 +165,9 @@ LABELS = {0: "❌ No Fit", 1: "⚙️ Partial Fit", 2: "✅ Good Fit"}
 
 
 def predict(res_text: str, job_text: str):
- 
-    r_emb = sbert.encode([res_text], normalize_embeddings=True)[0]
-    j_emb = sbert.encode([job_text], normalize_embeddings=True)[0]
+    # Эмбеддинги через наш MiniLM-энкодер
+    r_emb = encode_texts([res_text])[0]
+    j_emb = encode_texts([job_text])[0]
 
     r_emb_t = torch.tensor(r_emb, dtype=torch.float32, device=DEVICE)
     j_emb_t = torch.tensor(j_emb, dtype=torch.float32, device=DEVICE)
@@ -135,7 +179,6 @@ def predict(res_text: str, job_text: str):
     missing_set = skills_j - skills_r
 
     matched = len(matched_set)
-    
     skillfit = torch.tensor([float(matched)], dtype=torch.float32, device=DEVICE)
     flag = torch.tensor([1.0 if matched > 0 else 0.0], dtype=torch.float32, device=DEVICE)
 
@@ -157,9 +200,10 @@ def predict(res_text: str, job_text: str):
     return pred, probs, matched_set, missing_set
 
 
+
 st.set_page_config(page_title="Resume ↔ Job Match Scorer", layout="wide")
 
-st.title("🔍 Resume ↔ Job Match Scorer (SBERT + CrossAttention GRU)")
+st.title("🔍 Resume ↔ Job Match Scorer (MiniLM + CrossAttention GRU)")
 st.write("Enter resume and job description below:")
 
 col1, col2 = st.columns(2)
