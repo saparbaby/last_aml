@@ -105,7 +105,7 @@ def encode_texts(texts):
         counts = attention_mask.sum(dim=1).clamp(min=1)
         sentence_embs = summed / counts
         sentence_embs = nn.functional.normalize(sentence_embs, p=2, dim=1)
-    return sentence_embs.numpy()
+    return sentence_embs.detach().cpu().numpy()
 
 
 SKILLS = {
