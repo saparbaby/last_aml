@@ -1,25 +1,15 @@
 import torch
-torch._dynamo.config.suppress_errors = True
-torch._dynamo.config.cache_size_limit = 0
+torch._dynamo.disable()
 
 import streamlit as st
 import torch.nn as nn
-import numpy as np
 from transformers import AutoTokenizer, AutoModel
 
 class MLPv2(nn.Module):
     def __init__(self, dim_in):
         super().__init__()
-        self.fc1 = nn.Sequential(
-            nn.Linear(dim_in, 256),
-            nn.ReLU(),
-            nn.Dropout(0.25)
-        )
-        self.fc2 = nn.Sequential(
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Dropout(0.25)
-        )
+        self.fc1 = nn.Sequential(nn.Linear(dim_in, 256), nn.ReLU(), nn.Dropout(0.25))
+        self.fc2 = nn.Sequential(nn.Linear(256, 128), nn.ReLU(), nn.Dropout(0.25))
         self.res = nn.Linear(dim_in, 128)
         self.out = nn.Linear(128, 3)
 
@@ -33,18 +23,9 @@ class MLPv2(nn.Module):
 class CrossAttentionGRU(nn.Module):
     def __init__(self, emb_dim=384, hidden=128, heads=4):
         super().__init__()
-        self.gru = nn.GRU(
-            emb_dim,
-            hidden,
-            batch_first=True,
-            bidirectional=True
-        )
+        self.gru = nn.GRU(emb_dim, hidden, batch_first=True, bidirectional=True)
         self.norm = nn.LayerNorm(hidden * 2)
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=hidden * 2,
-            num_heads=heads,
-            batch_first=True
-        )
+        self.cross_attn = nn.MultiheadAttention(hidden * 2, heads, batch_first=True)
         fused_dim = hidden * 2 * 4 + 3
         self.mlp = MLPv2(fused_dim)
 
@@ -100,13 +81,11 @@ def encode_texts(texts):
         outputs = encoder(**encoded)
         token_embeddings = outputs.last_hidden_state
         attention_mask = encoded["attention_mask"].unsqueeze(-1)
-        attention_mask = attention_mask.to(token_embeddings.device)
         summed = (token_embeddings * attention_mask).sum(dim=1)
         counts = attention_mask.sum(dim=1).clamp(min=1)
         sentence_embs = summed / counts
         sentence_embs = nn.functional.normalize(sentence_embs, p=2, dim=1)
-
-    return sentence_embs.detach().cpu().to(torch.float32).numpy()
+    return sentence_embs.cpu().float().numpy()
 
 
 SKILLS = {
@@ -127,21 +106,25 @@ LABELS = {0: "❌ No Fit", 1: "⚙️ Partial Fit", 2: "✅ Good Fit"}
 def predict(res_text, job_text):
     r_emb = encode_texts([res_text])[0]
     j_emb = encode_texts([job_text])[0]
+
     r_emb_t = torch.tensor(r_emb, dtype=torch.float32)
     j_emb_t = torch.tensor(j_emb, dtype=torch.float32)
+
     skills_r = set(extract_skills(res_text))
     skills_j = set(extract_skills(job_text))
     matched_set = skills_r & skills_j
     missing_set = skills_j - skills_r
+
     matched = len(matched_set)
     skillfit = torch.tensor([float(matched)], dtype=torch.float32)
     flag = torch.tensor([1.0 if matched > 0 else 0.0], dtype=torch.float32)
 
     with torch.no_grad():
         logits = model(r_emb_t, j_emb_t, skillfit, flag)
-        probs = torch.softmax(logits, dim=1)[0].numpy()
+        probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
 
     p_no, p_partial, p_good = probs
+
     if p_good >= 0.65 and p_good - max(p_no, p_partial) >= 0.10:
         pred = 2
     elif p_no >= 0.65 and p_no - max(p_partial, p_good) >= 0.10:
