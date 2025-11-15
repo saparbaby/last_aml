@@ -87,7 +87,7 @@ class CrossAttentionGRU(nn.Module):
 
 
 # =========================
-# 2. Загрузка моделей (CPU, без .to)
+# 2. Загрузка моделей (CPU, без .to и .cpu)
 # =========================
 
 @st.cache_resource
@@ -108,7 +108,7 @@ tokenizer, encoder, model = load_models()
 
 
 # =========================
-# 3. Энкодер (MiniLM → mean pooling + L2, но в NumPy)
+# 3. Энкодер (MiniLM → mean pooling + L2, в NumPy, БЕЗ .cpu())
 # =========================
 
 def encode_texts(texts):
@@ -122,9 +122,9 @@ def encode_texts(texts):
 
     with torch.inference_mode():
         outputs = encoder(**encoded)
-        # Уводим всё в numpy на CPU, чтобы избежать проблем с device/meta
-        token_embeddings = outputs.last_hidden_state.detach().cpu().numpy()          # (B, T, H)
-        attention_mask = encoded["attention_mask"].detach().cpu().numpy()[..., None]  # (B, T, 1)
+        # ВАЖНО: без .cpu(), сразу в numpy
+        token_embeddings = outputs.last_hidden_state.detach().numpy()          # (B, T, H)
+        attention_mask = encoded["attention_mask"].detach().numpy()[..., None]  # (B, T, 1)
 
         attention_mask = attention_mask.astype(np.float32)
         token_embeddings = token_embeddings.astype(np.float32)
