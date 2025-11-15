@@ -1,12 +1,10 @@
 import streamlit as st
 import torch
 import torch.nn as nn
-import numpy as np
 from transformers import AutoTokenizer, AutoModel
 
-# -------------------
-# Model definition
-# -------------------
+torch._dynamo.config.suppress_errors = True
+torch._dynamo.disable()
 
 class MLPv2(nn.Module):
     def __init__(self, dim_in):
@@ -74,10 +72,6 @@ class CrossAttentionGRU(nn.Module):
         return self.mlp(feats)
 
 
-# -------------------
-# Model loading
-# -------------------
-
 @st.cache_resource
 def load_models():
     name = "sentence-transformers/all-MiniLM-L6-v2"
@@ -90,12 +84,9 @@ def load_models():
     model.eval()
     return tokenizer, encoder, model
 
+
 tokenizer, encoder, model = load_models()
 
-
-# -------------------
-# Text encoding
-# -------------------
 
 def encode_texts(texts):
     encoded = tokenizer(
@@ -109,7 +100,7 @@ def encode_texts(texts):
         for k in encoded:
             encoded[k] = encoded[k].to("cpu")
         outputs = encoder(**encoded)
-        token_embeddings = outputs.last_hidden_state.to("cpu")
+        token_embeddings = outputs.last_hidden_state.cpu()
         attention_mask = encoded["attention_mask"].unsqueeze(-1).float()
         summed = (token_embeddings * attention_mask).sum(dim=1)
         counts = attention_mask.sum(dim=1).clamp(min=1)
@@ -118,10 +109,6 @@ def encode_texts(texts):
     return sentence_embs.detach().cpu().numpy()
 
 
-# -------------------
-# Skills & labels
-# -------------------
-
 SKILLS = {
     "python","java","javascript","c++","sql","nosql","git","linux",
     "docker","kubernetes","ml","nlp","pandas","numpy","scikit-learn",
@@ -129,16 +116,14 @@ SKILLS = {
     "aws","azure","gcp","data analysis","machine learning","deep learning"
 }
 
+
 def extract_skills(text):
     text = text.lower()
     return [s for s in SKILLS if s in text]
 
+
 LABELS = {0: "❌ No Fit", 1: "⚙️ Partial Fit", 2: "✅ Good Fit"}
 
-
-# -------------------
-# Prediction
-# -------------------
 
 def predict(res_text, job_text):
     r_emb = encode_texts([res_text])[0]
@@ -155,7 +140,7 @@ def predict(res_text, job_text):
 
     with torch.no_grad():
         logits = model(r_emb_t, j_emb_t, skillfit, flag)
-        probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
+        probs = torch.softmax(logits, dim=1)[0].numpy()
 
     p_no, p_partial, p_good = probs
     if p_good >= 0.65 and p_good - max(p_no, p_partial) >= 0.10:
@@ -166,10 +151,6 @@ def predict(res_text, job_text):
         pred = 1
     return pred, probs, matched_set, missing_set
 
-
-# -------------------
-# Streamlit UI
-# -------------------
 
 st.set_page_config(page_title="Resume ↔ Job Match Scorer", layout="wide")
 st.title("🔍 Resume ↔ Job Match Scorer (MiniLM + CrossAttention GRU)")
