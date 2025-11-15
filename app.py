@@ -4,9 +4,6 @@ import torch.nn as nn
 from sentence_transformers import SentenceTransformer
 import numpy as np
 
-# ============================================================
-# 1. Model definition (MUST MATCH TRAINING EXACTLY)
-# ============================================================
 
 class MLPv2(nn.Module):
     def __init__(self, dim_in):
@@ -86,9 +83,6 @@ class CrossAttentionGRU(nn.Module):
         return self.mlp(feats)
 
 
-# ============================================================
-# 2. Load model + SBERT
-# ============================================================
 
 DEVICE = "cpu"
 
@@ -96,12 +90,11 @@ model = CrossAttentionGRU()
 model.load_state_dict(torch.load("model_best.pt", map_location="cpu"))
 model.eval()
 
-sbert = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+sbert = SentenceTransformer(
+    "sentence-transformers/all-MiniLM-L6-v2",
+    device="cpu"
+)
 
-
-# ============================================================
-# 3. Skills extraction
-# ============================================================
 
 SKILLS = {
     "python","java","javascript","c++","sql","nosql","git","linux",
@@ -114,10 +107,6 @@ def extract_skills(text):
     text = text.lower()
     return [s for s in SKILLS if s in text]
 
-
-# ============================================================
-# 4. Predict function
-# ============================================================
 
 LABELS = {0:"❌ No Fit", 1:"⚙️ Partial Fit", 2:"✅ Good Fit"}
 
@@ -144,10 +133,6 @@ def predict(res_text, job_text):
 
     return pred, probs.numpy(), skills_r & skills_j, skills_j - skills_r
 
-
-# ============================================================
-# 5. Streamlit UI
-# ============================================================
 
 st.set_page_config(page_title="Resume ↔ Job Match Scorer", layout="wide")
 
